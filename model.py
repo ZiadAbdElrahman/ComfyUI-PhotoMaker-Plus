@@ -49,11 +49,13 @@ class FuseModule(nn.Module):
         self.mlp2 = MLP(embed_dim, embed_dim, embed_dim, use_residual=True, operations=operations)
         self.layer_norm = operations.LayerNorm(embed_dim)
 
-    def fuse_fn(self, prompt_embeds, id_embeds):
+    def fuse_fn(self, prompt_embeds, id_embeds, weight):
         stacked_id_embeds = torch.cat([prompt_embeds, id_embeds], dim=-1)
         stacked_id_embeds = self.mlp1(stacked_id_embeds) + prompt_embeds
         stacked_id_embeds = self.mlp2(stacked_id_embeds)
         stacked_id_embeds = self.layer_norm(stacked_id_embeds)
+        stacked_id_embeds *= weight
+
         return stacked_id_embeds
 
     def forward(
@@ -61,6 +63,7 @@ class FuseModule(nn.Module):
         prompt_embeds,
         id_embeds,
         class_tokens_mask,
+        weight,
     ) -> torch.Tensor:
         # id_embeds shape: [b, max_num_inputs, 1, 2048]
         id_embeds = id_embeds.to(prompt_embeds.dtype)
@@ -84,7 +87,7 @@ class FuseModule(nn.Module):
         valid_id_embeds = valid_id_embeds.view(-1, valid_id_embeds.shape[-1])
         # slice out the image token embeddings
         image_token_embeds = prompt_embeds[class_tokens_mask]
-        stacked_id_embeds = self.fuse_fn(image_token_embeds, valid_id_embeds)
+        stacked_id_embeds = self.fuse_fn(image_token_embeds, valid_id_embeds, weight)
         assert class_tokens_mask.sum() == stacked_id_embeds.shape[0], f"{class_tokens_mask.sum()} != {stacked_id_embeds.shape[0]}"
         prompt_embeds.masked_scatter_(class_tokens_mask[:, None], stacked_id_embeds.to(prompt_embeds.dtype))
         updated_prompt_embeds = prompt_embeds.view(batch_size, seq_length, -1)
@@ -100,7 +103,7 @@ class PhotoMakerIDEncoder(comfy.clip_model.CLIPVisionModelProjection):
         self.visual_projection_2 = comfy.ops.manual_cast.Linear(1024, 1280, bias=False)
         self.fuse_module = FuseModule(2048, comfy.ops.manual_cast)
 
-    def forward(self, id_pixel_values, prompt_embeds, class_tokens_mask):
+    def forward(self, id_pixel_values, prompt_embeds, class_tokens_mask, average_images, weight):
         b, num_inputs, c, h, w = id_pixel_values.shape
         id_pixel_values = id_pixel_values.view(b * num_inputs, c, h, w)
 
@@ -108,12 +111,17 @@ class PhotoMakerIDEncoder(comfy.clip_model.CLIPVisionModelProjection):
         id_embeds = self.visual_projection(shared_id_embeds)
         id_embeds_2 = self.visual_projection_2(shared_id_embeds)
 
+        if average_images:
+            id_embeds = id_embeds.mean(0)[None]
+            id_embeds_2 = id_embeds_2.mean(0)[None]
+            num_inputs = 1 
+            
         id_embeds = id_embeds.view(b, num_inputs, 1, -1)
         id_embeds_2 = id_embeds_2.view(b, num_inputs, 1, -1)
 
         id_embeds = torch.cat((id_embeds, id_embeds_2), dim=-1)
         prompt_embeds=prompt_embeds.to(dtype=id_embeds.dtype)
-        updated_prompt_embeds = self.fuse_module(prompt_embeds, id_embeds, class_tokens_mask)
+        updated_prompt_embeds = self.fuse_module(prompt_embeds, id_embeds, class_tokens_mask, weight)
 
         return updated_prompt_embeds
 
