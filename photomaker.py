@@ -48,6 +48,8 @@ class PhotoMakerEncodePlus:
                     "image": ("IMAGE",),
                     "trigger_word": ("STRING", {"default": "img"}),
                     "text": ("STRING", {"multiline": True, "default": "photograph of a man img"}),
+                    "average_images": ("NUMBER",) ,
+                    "weight": ("NUMBER",) ,
                 },
         }
     RETURN_TYPES = ("CONDITIONING",)
@@ -56,9 +58,16 @@ class PhotoMakerEncodePlus:
     CATEGORY = "PhotoMaker"
 
     @torch.no_grad()
-    def apply_photomaker(self, clip: CLIP, photomaker: PhotoMakerIDEncoder, image: Tensor, trigger_word: str, text: str):
+    def apply_photomaker(self, clip: CLIP, photomaker: PhotoMakerIDEncoder, image: Tensor, trigger_word: str, text: str, average_images, weight):
+        weight = float(weight)
+        average_images = average_images == 1
+        
         if (num_id_images:=len(image)) == 0:
             raise ValueError("No image provided or found.")
+        
+        if average_images:
+            num_id_images = 1
+        
         trigger_word=trigger_word.strip()
         tokens = clip.tokenize(text)
         class_tokens_mask = {}
@@ -138,7 +147,7 @@ class PhotoMakerEncodePlus:
             image = image_bak
         pixel_values = comfy.clip_vision.clip_preprocess(image.to(photomaker.load_device)).float()
         cond = photomaker(id_pixel_values=pixel_values.unsqueeze(0), prompt_embeds=cond.to(photomaker.load_device),
-                        class_tokens_mask=torch.tensor(class_tokens_mask, dtype=torch.bool, device=photomaker.load_device).unsqueeze(0))
+                        class_tokens_mask=torch.tensor(class_tokens_mask, dtype=torch.bool, device=photomaker.load_device).unsqueeze(0), average_images=average_images, weight=weight)
         cond = cond.to(device=device_orig)
 
         return ([[cond, {"pooled_output": pooled}]],)
@@ -245,20 +254,20 @@ class PrepImagesForClipVisionFromPath:
         return (id_pixel_values,)
 
 supported = False
-try:
-    from comfy_extras.nodes_photomaker import PhotoMakerLoader as _PhotoMakerLoader
-    supported = True
-except: ...
+# try:
+#     from comfy_extras.nodes_photomaker import PhotoMakerLoader as _PhotoMakerLoader
+#     supported = True
+# except: ...
 
 NODE_CLASS_MAPPINGS = {
-   **({} if supported else {"PhotoMakerLoader": PhotoMakerLoader}),
+   **({} if supported else {"AF_PhotoMakerLoader": PhotoMakerLoader}),
     "PhotoMakerEncodePlus": PhotoMakerEncodePlus,
     "PhotoMakerStyles": PhotoMakerStyles,
     "PrepImagesForClipVisionFromPath": PrepImagesForClipVisionFromPath,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-   **({} if supported else {"PhotoMakerLoader": "Load PhotoMaker"}),
+   **({} if supported else {"AF_PhotoMakerLoader": "AF Load PhotoMaker"}),
     "PhotoMakerEncodePlus": "PhotoMaker Encode Plus",
     "PhotoMakerStyles": "Apply PhotoMaker Style",
     "PrepImagesForClipVisionFromPath": "Prepare Images For CLIP Vision From Path",
